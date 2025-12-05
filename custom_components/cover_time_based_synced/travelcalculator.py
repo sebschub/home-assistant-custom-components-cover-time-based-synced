@@ -8,6 +8,7 @@ E.g.:
 * At time 20 TravelCalculator will return position 70 (final position not reached).
 * At time 30 TravelCalculator will return position 60 (final position reached).
 """
+
 import time
 from enum import Enum
 
@@ -71,10 +72,11 @@ class TravelCalculator:
         self.travel_to_position = travel_to_position
         self.position_type = PositionType.CALCULATED
 
-        self.travel_direction = \
-            TravelStatus.DIRECTION_UP \
-            if travel_to_position > self.last_known_position else \
-            TravelStatus.DIRECTION_DOWN
+        self.travel_direction = (
+            TravelStatus.DIRECTION_UP
+            if travel_to_position > self.last_known_position
+            else TravelStatus.DIRECTION_DOWN
+        )
 
     def start_travel_up(self):
         """Start traveling up."""
@@ -117,11 +119,15 @@ class TravelCalculator:
 
         def position_reached_or_exceeded(relative_position):
             """Return if designated position was reached."""
-            if relative_position >= 0 \
-                    and self.travel_direction == TravelStatus.DIRECTION_DOWN:
+            if (
+                relative_position >= 0
+                and self.travel_direction == TravelStatus.DIRECTION_DOWN
+            ):
                 return True
-            if relative_position <= 0 \
-                    and self.travel_direction == TravelStatus.DIRECTION_UP:
+            if (
+                relative_position <= 0
+                and self.travel_direction == TravelStatus.DIRECTION_UP
+            ):
                 return True
             return False
 
@@ -131,20 +137,22 @@ class TravelCalculator:
         travel_time = self._calculate_travel_time(relative_position)
         if self.current_time() > self.travel_started_time + travel_time:
             return self.travel_to_position
-        progress = (self.current_time()-self.travel_started_time)/travel_time
+        progress = (self.current_time() - self.travel_started_time) / travel_time
         position = self.last_known_position + relative_position * progress
         return int(position)
 
     def _calculate_travel_time(self, relative_position):
         """Calculate time to travel to relative position."""
-        travel_direction = \
-            TravelStatus.DIRECTION_UP \
-            if relative_position > 0 else \
-            TravelStatus.DIRECTION_DOWN
-        travel_time_full = \
-            self.travel_time_up \
-            if travel_direction == TravelStatus.DIRECTION_UP else \
-            self.travel_time_down
+        travel_direction = (
+            TravelStatus.DIRECTION_UP
+            if relative_position > 0
+            else TravelStatus.DIRECTION_DOWN
+        )
+        travel_time_full = (
+            self.travel_time_up
+            if travel_direction == TravelStatus.DIRECTION_UP
+            else self.travel_time_down
+        )
         travel_range = self.position_open - self.position_closed
 
         return travel_time_full * abs(relative_position) / travel_range
