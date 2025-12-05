@@ -40,6 +40,8 @@ CONF_ALIASES = "aliases"
 CONF_TRAVELLING_TIME_DOWN = "travelling_time_down"
 CONF_TRAVELLING_TIME_UP = "travelling_time_up"
 CONF_SEND_STOP_AT_ENDS = "send_stop_at_ends"
+CONF_SEGMENTS_UP = "segments_up"
+CONF_SEGMENTS_DOWN = "segments_down"
 DEFAULT_TRAVEL_TIME = 25
 DEFAULT_SEND_STOP_AT_ENDS = False
 
@@ -75,6 +77,14 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
                     vol.Optional(
                         CONF_SEND_STOP_AT_ENDS, default=DEFAULT_SEND_STOP_AT_ENDS
                     ): cv.boolean,
+                    vol.Optional(CONF_SEGMENTS_UP): vol.All(
+                        cv.ensure_list,
+                        [vol.Schema([cv.positive_int, cv.positive_float])],
+                    ),
+                    vol.Optional(CONF_SEGMENTS_DOWN): vol.All(
+                        cv.ensure_list,
+                        [vol.Schema([cv.positive_int, cv.positive_float])],
+                    ),
                 }
             }
         ),
@@ -99,16 +109,75 @@ ACTION_SCHEMA = cv.make_entity_service_schema(
 DOMAIN = "cover_time_based_synced"
 
 
+def validate_device_config(config):
+    """Validate that either travelling_time or segments are provided for both directions."""
+    has_time_down = CONF_TRAVELLING_TIME_DOWN in config
+    has_time_up = CONF_TRAVELLING_TIME_UP in config
+    has_segments_down = CONF_SEGMENTS_DOWN in config
+    has_segments_up = CONF_SEGMENTS_UP in config
+
+    # Check down direction
+    if not has_time_down and not has_segments_down:
+        raise vol.Invalid(
+            f"Either '{CONF_TRAVELLING_TIME_DOWN}' or '{CONF_SEGMENTS_DOWN}' must be specified"
+        )
+
+    # Check up direction
+    if not has_time_up and not has_segments_up:
+        raise vol.Invalid(
+            f"Either '{CONF_TRAVELLING_TIME_UP}' or '{CONF_SEGMENTS_UP}' must be specified"
+        )
+
+    return config
+
+
+DEVICE_SCHEMA = vol.All(
+    vol.Schema(
+        {
+            vol.Required(CONF_NAME): cv.string,
+            vol.Required(CONF_OPEN_SWITCH_ENTITY_ID): cv.entity_id,
+            vol.Required(CONF_CLOSE_SWITCH_ENTITY_ID): cv.entity_id,
+            vol.Optional(CONF_ALIASES, default=[]): vol.All(
+                cv.ensure_list, [cv.string]
+            ),
+            vol.Optional(CONF_TRAVELLING_TIME_DOWN): cv.positive_int,
+            vol.Optional(CONF_TRAVELLING_TIME_UP): cv.positive_int,
+            vol.Optional(
+                CONF_SEND_STOP_AT_ENDS, default=DEFAULT_SEND_STOP_AT_ENDS
+            ): cv.boolean,
+            vol.Optional(CONF_SEGMENTS_UP): vol.All(
+                cv.ensure_list,
+                [vol.Schema([cv.positive_int, cv.positive_float])],
+            ),
+            vol.Optional(CONF_SEGMENTS_DOWN): vol.All(
+                cv.ensure_list,
+                [vol.Schema([cv.positive_int, cv.positive_float])],
+            ),
+        }
+    ),
+    validate_device_config,
+)
+
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+    {
+        vol.Optional(CONF_DEVICES, default={}): vol.Schema({cv.string: DEVICE_SCHEMA}),
+    }
+)
+
+
 def devices_from_config(domain_config):
     """Parse configuration and add cover devices."""
     devices = []
     for device_id, config in domain_config[CONF_DEVICES].items():
         name = config.pop(CONF_NAME)
-        travel_time_down = config.pop(CONF_TRAVELLING_TIME_DOWN)
-        travel_time_up = config.pop(CONF_TRAVELLING_TIME_UP)
+        travel_time_down = config.pop(CONF_TRAVELLING_TIME_DOWN, None)
+        travel_time_up = config.pop(CONF_TRAVELLING_TIME_UP, None)
         open_switch_entity_id = config.pop(CONF_OPEN_SWITCH_ENTITY_ID)
         close_switch_entity_id = config.pop(CONF_CLOSE_SWITCH_ENTITY_ID)
         send_stop_at_ends = config.pop(CONF_SEND_STOP_AT_ENDS)
+        segments_up = config.pop(CONF_SEGMENTS_UP, None)
+        segments_down = config.pop(CONF_SEGMENTS_DOWN, None)
+
         device = CoverTimeBased(
             device_id,
             name,
@@ -117,6 +186,8 @@ def devices_from_config(domain_config):
             open_switch_entity_id,
             close_switch_entity_id,
             send_stop_at_ends,
+            segments_up,
+            segments_down,
         )
         devices.append(device)
     return devices
@@ -147,6 +218,8 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
         open_switch_entity_id,
         close_switch_entity_id,
         send_stop_at_ends,
+        segments_up=None,
+        segments_down=None,
     ):
         """Initialize the cover."""
         self._travel_time_down = travel_time_down
@@ -167,7 +240,22 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
 
         self._unsubscribe_auto_updater = None
 
-        self.tc = TravelCalculator(self._travel_time_down, self._travel_time_up)
+        # Convert segments config to expected format
+        formatted_segments_up = None
+        formatted_segments_down = None
+
+        if segments_up is not None:
+            formatted_segments_up = [tuple(seg) for seg in segments_up]
+        if segments_down is not None:
+            formatted_segments_down = [tuple(seg) for seg in segments_down]
+
+        # Create TravelCalculator with segments
+        self.tc = TravelCalculator(
+            travel_time_down=self._travel_time_down,
+            travel_time_up=self._travel_time_up,
+            segments_up=formatted_segments_up,
+            segments_down=formatted_segments_down,
+        )
 
         self._switch_close_state = "off"
         self._switch_open_state = "off"

@@ -1,6 +1,8 @@
 """
+Based on
 https://github.com/XKNX/xknx/blob/0.9.4/xknx/devices/travelcalculator.py
 Module TravelCalculator provides functionality for predicting the current position of a Cover.
+Supports multi-segment travel with different speeds for different portions of movement.
 E.g.:
 * Given a Cover that takes 100 seconds to travel from top to bottom.
 * Starting from position 90, directed to position 60 at time 0.
@@ -34,8 +36,21 @@ class TravelCalculator:
 
     # pylint: disable=too-many-instance-attributes
 
-    def __init__(self, travel_time_down, travel_time_up):
-        """Initialize TravelCalculator class."""
+    def __init__(
+        self,
+        travel_time_down=None,
+        travel_time_up=None,
+        segments_up=None,
+        segments_down=None,
+    ):
+        """Initialize TravelCalculator class.
+
+        Args:
+            travel_time_down: Total time to travel down (used if segments_down not provided)
+            travel_time_up: Total time to travel up (used if segments_up not provided)
+            segments_up: List of tuples [(position_end, duration), ...] defining segments from 0 to 100 for upward travel.
+            segments_down: List of tuples [(position_end, duration), ...] defining segments from 0 to 100 for downward travel.
+        """
         self.position_type = PositionType.UNKNOWN
         self.last_known_position = 0
 
@@ -51,6 +66,23 @@ class TravelCalculator:
         self.position_open = 100
 
         self.time_set_from_outside = None
+
+        # Set up segments - symmetric definition: both go from 0 to 100 in position
+        if segments_up is not None:
+            self.segments_up = segments_up
+        elif travel_time_up is not None:
+            self.segments_up = [(100, travel_time_up)]
+        else:
+            raise ValueError("Either segments_up or travel_time_up must be provided")
+
+        if segments_down is not None:
+            self.segments_down = segments_down
+        elif travel_time_down is not None:
+            self.segments_down = [(100, travel_time_down)]
+        else:
+            raise ValueError(
+                "Either segments_down or travel_time_down must be provided"
+            )
 
     def set_position(self, position):
         """Set known position of cover."""
@@ -114,7 +146,7 @@ class TravelCalculator:
         return self.current_position() == self.position_closed
 
     def _calculate_position(self):
-        """Return calculated position."""
+        """Return calculated position using multi-segment travel."""
         relative_position = self.travel_to_position - self.last_known_position
 
         def position_reached_or_exceeded(relative_position):
@@ -134,28 +166,112 @@ class TravelCalculator:
         if position_reached_or_exceeded(relative_position):
             return self.travel_to_position
 
-        travel_time = self._calculate_travel_time(relative_position)
-        if self.current_time() > self.travel_started_time + travel_time:
-            return self.travel_to_position
-        progress = (self.current_time() - self.travel_started_time) / travel_time
-        position = self.last_known_position + relative_position * progress
+        elapsed_time = self.current_time() - self.travel_started_time
+        position = self._position_from_time(elapsed_time)
+
+        # Check if target reached
+        if self.travel_direction == TravelStatus.DIRECTION_UP:
+            if position >= self.travel_to_position:
+                return self.travel_to_position
+        else:
+            if position <= self.travel_to_position:
+                return self.travel_to_position
         return int(position)
 
-    def _calculate_travel_time(self, relative_position):
-        """Calculate time to travel to relative position."""
-        travel_direction = (
-            TravelStatus.DIRECTION_UP
-            if relative_position > 0
-            else TravelStatus.DIRECTION_DOWN
+    def _position_from_time(self, elapsed_time):
+        """Calculate position from elapsed time using segments."""
+        segments = (
+            self.segments_up
+            if self.travel_direction == TravelStatus.DIRECTION_UP
+            else self.segments_down
         )
-        travel_time_full = (
-            self.travel_time_up
-            if travel_direction == TravelStatus.DIRECTION_UP
-            else self.travel_time_down
-        )
-        travel_range = self.position_open - self.position_closed
+        start_pos = self.last_known_position
+        end_pos = self.travel_to_position
 
-        return travel_time_full * abs(relative_position) / travel_range
+        # Calculate which segments we need to traverse
+        traversed_segments = self._calculate_traversed_segments(
+            segments, start_pos, end_pos
+        )
+        if not traversed_segments:
+            return start_pos
+
+        # Calculate position based on elapsed time through segments
+        time_accumulated = 0
+        current_pos = start_pos
+
+        for seg_start, seg_end, seg_duration in traversed_segments:
+            if elapsed_time <= time_accumulated + seg_duration:
+                # We're in this segment
+                progress = (elapsed_time - time_accumulated) / seg_duration
+                position = seg_start + (seg_end - seg_start) * progress
+                return position
+
+            time_accumulated += seg_duration
+            current_pos = seg_end
+
+        return current_pos
+
+    def _calculate_traversed_segments(self, segments, start_pos, end_pos):
+        """Calculate which segments are traversed and their proportional durations.
+
+        Works for both upward and downward travel using symmetric segment definitions.
+        Segments are defined as [(position_end, duration), ...] from 0 to 100.
+        """
+        is_going_up = self.travel_direction == TravelStatus.DIRECTION_UP
+        result = []
+
+        # Build segment ranges
+        segment_ranges = []
+        prev_pos = 0
+
+        for seg_end, seg_time in segments:
+            segment_ranges.append((prev_pos, seg_end, seg_time))
+            prev_pos = seg_end
+
+        # For downward travel, process segments in reverse order
+        ranges_to_process = segment_ranges if is_going_up else reversed(segment_ranges)
+
+        for seg_start, seg_end, seg_time in ranges_to_process:
+            if is_going_up:
+                # Skip segments entirely below our starting position
+                if seg_end <= start_pos:
+                    continue
+
+                # Calculate actual start and end within this segment
+                actual_start = max(seg_start, start_pos)
+                actual_end = min(seg_end, end_pos)
+
+                # Check if we have a valid range
+                if actual_end > actual_start:
+                    seg_range = seg_end - seg_start
+                    actual_range = actual_end - actual_start
+                    proportional_time = seg_time * (actual_range / seg_range)
+                    result.append((actual_start, actual_end, proportional_time))
+
+                # Stop if we've reached the end position
+                if seg_end >= end_pos:
+                    break
+            else:
+                # Skip segments entirely above our starting position
+                if seg_start >= start_pos:
+                    continue
+
+                # Calculate actual start and end within this segment
+                actual_start = min(start_pos, seg_end)
+                actual_end = max(end_pos, seg_start)
+
+                # Check if we have a valid range
+                if actual_start > actual_end:
+                    seg_range = seg_end - seg_start
+                    actual_range = actual_start - actual_end
+                    proportional_time = seg_time * (actual_range / seg_range)
+                    result.append((actual_start, actual_end, proportional_time))
+
+                # Stop if we've reached the end position
+                if seg_start <= end_pos:
+                    break
+
+        return result
 
     def current_time(self):
         """Get current time. May be modified from outside (for unit tests)."""
